@@ -1,181 +1,226 @@
-// Version 1
-// Added the range and zero-search options
+#define _XOPEN_SOURCE 700
 
+#include "dupes.h"
+
+#include <errno.h>
+#include <ftw.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <ftw.h>
 #include <unistd.h>
-#include <libgen.h>
 
-// Define Maximum Number of Files.  Currently 5 Billion
-#define maximum_number_of_files 5000000
+static FileList files = {0};
+static size_t compare_chars = 20;
+static off_t tolerance = 0;
+static bool delete_duplicates = false;
+static size_t duplicate_count = 0;
+static size_t scanned_count = 0;
 
-char *directory_name[maximum_number_of_files];
-char *file_name[maximum_number_of_files];
-long file_size[maximum_number_of_files];
-int filenum = 0;
-char *file_name[];
-int hit = 0;
-int delete = 0;
-int compnum = 0;
-int tolerance = 0;
-unsigned long int pass = 0;
-
-void help(void);
-char *get_current_directory(void);
-
-int get_file(const char *base_name, const struct stat *info, const int typeflag,
-             struct FTW *pathinfo);
-
-int get_file_list(char *pwd);
-
-int check_existing(char *dirc, char *base_name, uintptr_t tfilesize);
-
-int add_file_to_memory(char *dirc, char *base_name, uintptr_t tfilesize);
+static void free_file_list(void);
+static int visit_file(const char *path, const struct stat *info, int typeflag,
+                      struct FTW *pathinfo);
+static int process_file(const char *path, const char *name, off_t size);
+static int append_file(const char *path, const char *name, off_t size);
+static bool names_match(const char *left, const char *right);
+static bool sizes_match(off_t left, off_t right);
+static int parse_nonnegative(const char *text, uintmax_t maximum,
+                             uintmax_t *value);
 
 int main(int argc, char *argv[]) {
+    const char *root = ".";
+    int positional = 0;
 
-    printf("\n");
-    compnum = 20;
-
-    int compare = compnum;
-
-    if (argv[1]) {
-
-        if (strstr(argv[1], "-h")) {
-            help();
-        } else if (strstr(argv[1], "-d")) {
-            delete = 1;
-        } else {
-            compare = atoi(argv[1]);
-            if (compare < 1) {
-                compare = 0;
-            }
-            compnum = compare;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            help(argv[0]);
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--delete") == 0) {
+            delete_duplicates = true;
+            continue;
         }
 
-    }
-    if (argv[2]) {
-
-        if (strstr(argv[2], "-d")) {
-            delete = 1;
-        } else {
-            tolerance = atoi(argv[2]);
-        }
-    }
-
-    if (argv[3] && strstr(argv[3], "-d")) {
-
-        delete = 1;
-
-    }
-
-    char *pwd = get_current_directory();
-    get_file_list(pwd);
-}
-
-int get_file_list(char *pwd) {
-    DIR *d;
-    struct dirent *dir;
-
-    d = opendir(pwd);
-    if (d) {
-
-        nftw(pwd, get_file, FTW_D, FTW_PHYS);
-    }
-    closedir(d);
-    return (0);
-}
-
-char *get_current_directory() {
-    char *pwd = getenv("PWD");
-
-    return pwd;
-}
-
-int get_file(const char *base_name, const struct stat *info, const int typeflag,
-             struct FTW *pathinfo) {
-    const char *path = base_name;
-    char *basec, *current_filename;
-
-    basec = strdup(path);
-    current_filename = basename(basec);
-    uintptr_t tfilesize = info->st_size;
-
-    if (typeflag == FTW_F && current_filename[0] != '.') {
-
-        add_file_to_memory(basec, current_filename, tfilesize);
-    }
-    return 0;
-}
-
-int add_file_to_memory(char *dirc, char *base_name, uintptr_t tfilesize) {
-    int exists = 0;
-
-    pass++;
-    if (pass > 1) {
-        exists = check_existing(dirc, base_name, tfilesize);
-    }
-    if (exists == 0) {
-        filenum++;
-        directory_name[filenum] = malloc(255 * sizeof(char));
-        file_name[filenum] = malloc(255 * sizeof(char));
-        file_size[filenum] = tfilesize;
-        directory_name[filenum] = dirc;
-        strcpy(file_name[filenum], base_name);
-    }
-    return 0;
-}
-
-int check_existing(char *dirc, char *base_name, uintptr_t tfilesize) {
-    int i = 0;
-    int existing = 0;
-    int low = 0;
-    int high = 0;
-
-    for (i = 1; i < filenum + 1; i++) {
-        if (strncmp(base_name, file_name[i], compnum) == 0) {
-            int comparison = file_size[i];
-
-            if (tolerance < 1) { tolerance = 1; }
-            low = comparison - tolerance;
-            high = comparison + tolerance;
-
-
-            if (tfilesize > low && tfilesize < high) {
-                hit++;
-                int myfilesize = tfilesize;
-
-                existing++;
-
-                printf("%da) %s %ld\n", hit, directory_name[i], file_size[i]);
-
-                if (delete == 1) {
-                    printf("***** DELETED *****> %db) %s %d <***** DELETED *****", hit, dirc, myfilesize);
-                    unlink(dirc);
-                } else {
-
-                    printf("%db) %s %d ", hit, dirc, myfilesize);
+        uintmax_t value = 0;
+        switch (positional) {
+            case 0:
+                if (parse_nonnegative(argv[i], SIZE_MAX, &value) != 0) {
+                    fprintf(stderr, "Invalid character count: %s\n", argv[i]);
+                    return EXIT_FAILURE;
                 }
-                printf("\n\n");
-            }
+                compare_chars = (size_t)value;
+                break;
+            case 1:
+                if (parse_nonnegative(argv[i], (uintmax_t)LLONG_MAX, &value) != 0) {
+                    fprintf(stderr, "Invalid byte tolerance: %s\n", argv[i]);
+                    return EXIT_FAILURE;
+                }
+                tolerance = (off_t)value;
+                break;
+            case 2:
+                root = argv[i];
+                break;
+            default:
+                fprintf(stderr, "Too many arguments.\n\n");
+                help(argv[0]);
+                return EXIT_FAILURE;
         }
+        ++positional;
     }
-    return existing;
+
+    int walk_result = nftw(root, visit_file, 32, FTW_PHYS);
+    if (walk_result != 0) {
+        if (walk_result == -1) {
+            fprintf(stderr, "Unable to scan '%s': %s\n", root, strerror(errno));
+        } else {
+            fprintf(stderr, "Scan stopped before completion.\n");
+        }
+        free_file_list();
+        return EXIT_FAILURE;
+    }
+
+    printf("Scanned %zu files; found %zu duplicate%s.\n",
+           scanned_count, duplicate_count, duplicate_count == 1 ? "" : "s");
+
+    free_file_list();
+    return EXIT_SUCCESS;
 }
 
+static int visit_file(const char *path, const struct stat *info, int typeflag,
+                      struct FTW *pathinfo) {
+    if (typeflag != FTW_F) {
+        return 0;
+    }
 
-void help(void) {
+    ++scanned_count;
+    const char *name = path + pathinfo->base;
+    if (name[0] == '.') {
+        return 0;
+    }
 
-    printf("\nDupes: This program finds duplicate files in a directory tree.  It matches both filenames and file sizes when determining duplicates\n\nMatching these values verses generating hashes makes the program extremely fast. It can scan tens of thousands of files in seconds.\n\n");
-    printf("\nUsage:  dupes [number of characters to match from beginning] [number of bytes of leeway] [--delete]\n\n");
-    printf("Example:  dupes 10 50 --delete\n\n");
-    printf("The above command will delete all repetitive files that match the first 10 characters of each other, and have a file size within 50 bytes of each other\n");
-    printf("\nNote: The default values are 20 and 0, meaning the first 20 characters of a filename must match, and the files must have the exact same size.  Filenames less than 20 characters long must match their entire filenames\n\n");
+    return process_file(path, name, info->st_size);
+}
 
-    exit(0);
+static int process_file(const char *path, const char *name, off_t size) {
+    bool duplicate = false;
 
+    for (size_t i = 0; i < files.count; ++i) {
+        const FileEntry *existing = &files.items[i];
+        if (!names_match(name, existing->name) || !sizes_match(size, existing->size)) {
+            continue;
+        }
 
+        duplicate = true;
+        ++duplicate_count;
+        printf("%zua) %s (%jd bytes)\n", duplicate_count, existing->path,
+               (intmax_t)existing->size);
+        printf("%zub) %s (%jd bytes)%s\n\n", duplicate_count, path,
+               (intmax_t)size, delete_duplicates ? " [deleting]" : "");
+
+        if (delete_duplicates && unlink(path) != 0) {
+            fprintf(stderr, "Could not delete '%s': %s\n", path, strerror(errno));
+            return 0;
+        }
+
+        /* One file is reported once, against its earliest matching file. */
+        break;
+    }
+
+    if (!duplicate) {
+        return append_file(path, name, size);
+    }
+    return 0;
+}
+
+static int append_file(const char *path, const char *name, off_t size) {
+    if (files.count == files.capacity) {
+        size_t new_capacity = files.capacity == 0 ? 1024 : files.capacity * 2;
+        if (new_capacity < files.capacity ||
+            new_capacity > SIZE_MAX / sizeof(*files.items)) {
+            fprintf(stderr, "Too many files to store in memory.\n");
+            return 1;
+        }
+
+        FileEntry *new_items = realloc(files.items,
+                                       new_capacity * sizeof(*files.items));
+        if (new_items == NULL) {
+            fprintf(stderr, "Out of memory while scanning files.\n");
+            return 1;
+        }
+        files.items = new_items;
+        files.capacity = new_capacity;
+    }
+
+    char *saved_path = strdup(path);
+    char *saved_name = strdup(name);
+    if (saved_path == NULL || saved_name == NULL) {
+        free(saved_path);
+        free(saved_name);
+        fprintf(stderr, "Out of memory while saving '%s'.\n", path);
+        return 1;
+    }
+
+    files.items[files.count++] = (FileEntry){
+        .path = saved_path,
+        .name = saved_name,
+        .size = size,
+    };
+    return 0;
+}
+
+static bool names_match(const char *left, const char *right) {
+    if (compare_chars == 0) {
+        return strcmp(left, right) == 0;
+    }
+    return strncmp(left, right, compare_chars) == 0;
+}
+
+static bool sizes_match(off_t left, off_t right) {
+    if (left >= right) {
+        return (uintmax_t)(left - right) <= (uintmax_t)tolerance;
+    }
+    return (uintmax_t)(right - left) <= (uintmax_t)tolerance;
+}
+
+static int parse_nonnegative(const char *text, uintmax_t maximum,
+                             uintmax_t *value) {
+    if (text == NULL || *text == '\0' || *text == '-') {
+        return -1;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    uintmax_t parsed = strtoumax(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || parsed > maximum) {
+        return -1;
+    }
+
+    *value = parsed;
+    return 0;
+}
+
+static void free_file_list(void) {
+    for (size_t i = 0; i < files.count; ++i) {
+        free(files.items[i].path);
+        free(files.items[i].name);
+    }
+    free(files.items);
+}
+
+void help(const char *program_name) {
+    printf("Dupes finds likely duplicate files in a directory tree by comparing "
+           "filename prefixes and file sizes.\n\n");
+    printf("Usage: %s [characters] [byte-tolerance] [directory] [--delete]\n\n",
+           program_name);
+    printf("Defaults:\n"
+           "  characters      20\n"
+           "  byte-tolerance  0 (exact size)\n"
+           "  directory       current directory\n\n");
+    printf("Examples:\n"
+           "  %s\n"
+           "  %s 10 50 /path/to/files\n"
+           "  %s 10 50 /path/to/files --delete\n\n",
+           program_name, program_name, program_name);
+    printf("Warning: --delete permanently removes each later matching file.\n");
 }

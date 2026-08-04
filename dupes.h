@@ -1,20 +1,22 @@
-#ifndef DUPES_H_   
-#define DUPES_H_
+#ifndef DUPES_H
+#define DUPES_H
 
-// Define Maximum Number of Files.  Currently 5 Billion
-#define maximum_number_of_files 5000000000
+#include <stdbool.h>
+#include <stddef.h>
+#include <sys/types.h>
 
-char *get_current_directory (void);
-int get_file (const char *base_name, const struct stat *info, const int typeflag,
-	      struct FTW *pathinfo);
-int get_file_list (char *pwd);
-int check_existing (char *dirc, char *base_name, uintptr_t tfilesize);
-int add_file_to_memory (char *dirc, char *base_name, uintptr_t tfilesize);
+typedef struct {
+    char *path;
+    char *name;
+    off_t size;
+} FileEntry;
 
-char *directory_name[maximum_number_of_files];
-char *file_name[maximum_number_of_files];
-long file_size[maximum_number_of_files];
-int delete_files(char *full_name);
-void help(void);
+typedef struct {
+    FileEntry *items;
+    size_t count;
+    size_t capacity;
+} FileList;
 
-#endif // DUPES_H_
+void help(const char *program_name);
+
+#endif
